@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>BionicPOS Reports</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="config.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen">
+    <header class="border-b border-slate-800 bg-slate-900/60">
+        <div class="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">$</div>
+                <div>
+                    <h1 class="font-bold text-sm">BionicPOS Reports</h1>
+                    <span id="userEmail" class="text-xs text-slate-400"></span>
+                </div>
+            </div>
+            <button id="signOutButton" class="text-xs text-slate-400 hover:text-white border border-slate-800 rounded-lg px-3 py-1.5">
+                Sign Out
+            </button>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-4 py-6 space-y-6">
+        <div class="flex gap-2">
+            <button data-range="today" class="text-xs font-semibold px-4 py-2 rounded-xl bg-emerald-600">Today</button>
+            <button data-range="week" class="text-xs font-semibold px-4 py-2 rounded-xl bg-slate-800">This Week</button>
+            <button data-range="month" class="text-xs font-semibold px-4 py-2 rounded-xl bg-slate-800">This Month</button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <span class="text-xs text-slate-400 block mb-1">Total Sales</span>
+                <b id="totalSales" class="text-2xl font-mono text-emerald-400">$0.00</b>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <span class="text-xs text-slate-400 block mb-1">Orders</span>
+                <b id="orderCount" class="text-2xl font-mono">0</b>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <span class="text-xs text-slate-400 block mb-1">Average Ticket</span>
+                <b id="avgTicket" class="text-2xl font-mono">$0.00</b>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <h2 class="text-sm font-bold mb-2">Top Items</h2>
+                <div id="topItemsTable"></div>
+            </section>
+            <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <h2 class="text-sm font-bold mb-2">Sales by Payment Method</h2>
+                <div id="paymentMethodTable"></div>
+            </section>
+            <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 md:col-span-2">
+                <h2 class="text-sm font-bold mb-2">Sales by Employee</h2>
+                <div id="employeeTable"></div>
+            </section>
+        </div>
+    </main>
+
+    <script>
+        const supabaseClient = supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+
+        async function requireAuth() {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session) {
+                window.location.replace("index.html");
+                return null;
+            }
+            return session;
+        }
+
+        function rangeToDates(range) {
+            const now = new Date();
+            let start;
+            if (range === "today") {
+                start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            } else if (range === "week") {
+                start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+            } else {
+                start = new Date(now.getFullYear(), now.getMonth(), 1);
+            }
+            return { start, end: now };
+        }
+
+        function updateRangeButtons(range) {
+            for (const btn of document.querySelectorAll("[data-range]")) {
+                const active = btn.dataset.range === range;
+                btn.classList.toggle("bg-emerald-600", active);
+                btn.classList.toggle("bg-slate-800", !active);
+            }
+        }
+
+        function formatCurrency(amount) {
+            return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
+        }
+
+        function escapeHtml(value) {
+            const div = document.createElement("div");
+            div.textContent = value;
+            return div.innerHTML;
+        }
+
+        function renderTable(elementId, rows, headers) {
+            const el = document.getElementById(elementId);
+            if (!rows.length) {
+                el.innerHTML = '<p class="text-sm text-slate-500 py-4 text-center">No data for this range.</p>';
+                return;
+            }
+            el.innerHTML = `
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-slate-400 border-b border-slate-800">
+                            <th class="py-2">${headers[0]}</th>
+                            <th class="py-2 text-right">${headers[1]}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(([label, value]) => `
+                            <tr class="border-b border-slate-800/50">
+                                <td class="py-2">${escapeHtml(label)}</td>
+                                <td class="py-2 text-right font-mono text-emerald-400">${value}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>`;
+        }
+
+        function render(orders, lines, employees) {
+            const totalSales = orders.reduce((sum, order) => sum + Number(order.total), 0);
+            const orderCount = orders.length;
+            const avgTicket = orderCount ? totalSales / orderCount : 0;
+
+            document.getElementById("totalSales").textContent = formatCurrency(totalSales);
+            document.getElementById("orderCount").textContent = orderCount;
+            document.getElementById("avgTicket").textContent = formatCurrency(avgTicket);
+
+            const itemTotals = {};
+            for (const line of lines) {
+                itemTotals[line.item_name] = (itemTotals[line.item_name] || 0) + Number(line.price) * line.quantity;
+            }
+            const topItems = Object.entries(itemTotals).sort((a, b) => b[1] - a[1]).slice(0, 10)
+                .map(([name, total]) => [name, formatCurrency(total)]);
+            renderTable("topItemsTable", topItems, ["Item", "Sales"]);
+
+            const methodTotals = {};
+            for (const order of orders) {
+                const method = order.payment_method || "Unknown";
+                methodTotals[method] = (methodTotals[method] || 0) + Number(order.total);
+            }
+            const methodRows = Object.entries(methodTotals).sort((a, b) => b[1] - a[1])
+                .map(([method, total]) => [method, formatCurrency(total)]);
+            renderTable("paymentMethodTable", methodRows, ["Method", "Sales"]);
+
+            const employeeNames = Object.fromEntries(employees.map((employee) => [employee.id, employee.display_name]));
+            const employeeTotals = {};
+            for (const order of orders) {
+                const name = employeeNames[order.server_id] || "Unknown";
+                employeeTotals[name] = (employeeTotals[name] || 0) + Number(order.total);
+            }
+            const employeeRows = Object.entries(employeeTotals).sort((a, b) => b[1] - a[1])
+                .map(([name, total]) => [name, formatCurrency(total)]);
+            renderTable("employeeTable", employeeRows, ["Employee", "Sales"]);
+        }
+
+        async function loadReports(range) {
+            updateRangeButtons(range);
+            const { start, end } = rangeToDates(range);
+
+            const { data: orders, error: ordersError } = await supabaseClient
+                .from("orders")
+                .select("*")
+                .eq("status", "paid")
+                .gte("closed_at", start.toISOString())
+                .lte("closed_at", end.toISOString());
+
+            if (ordersError) {
+                alert("Error loading orders: " + ordersError.message);
+                return;
+            }
+
+            const orderIds = orders.map((order) => order.id);
+            let lines = [];
+            if (orderIds.length) {
+                const { data: lineData, error: linesError } = await supabaseClient
+                    .from("order_lines")
+                    .select("*")
+                    .in("order_id", orderIds);
+                if (linesError) {
+                    alert("Error loading order lines: " + linesError.message);
+                    return;
+                }
+                lines = lineData;
+            }
+
+            const { data: employees } = await supabaseClient.from("employees").select("*");
+
+            render(orders, lines, employees || []);
+        }
+
+        async function init() {
+            const session = await requireAuth();
+            if (!session) return;
+
+            document.getElementById("userEmail").textContent = session.user.email;
+            for (const btn of document.querySelectorAll("[data-range]")) {
+                btn.addEventListener("click", () => loadReports(btn.dataset.range));
+            }
+            document.getElementById("signOutButton").addEventListener("click", async () => {
+                await supabaseClient.auth.signOut();
+                window.location.replace("index.html");
+            });
+
+            loadReports("today");
+        }
+
+        init();
+    </script>
+</body>
+</html>
